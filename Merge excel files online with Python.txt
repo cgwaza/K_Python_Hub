@@ -1,0 +1,98 @@
+import os
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
+
+def authenticate_google_drive(credentials_file_path):
+    scopes = ['https://www.googleapis.com/auth/drive.readonly']
+    credentials = service_account.Credentials.from_service_account_file(credentials_file_path, scopes=scopes)
+    service = build('drive', 'v3', credentials=credentials)
+    return service
+
+def download_files_from_drive(service, folder_id, output_folder):
+    results = service.files().list(q=f"'{folder_id}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'",
+                                   fields='files(id, name)').execute()
+    items = results.get('files', [])
+    if not items:
+        print('No files found.')
+    else:
+        for item in items:
+            file_id = item['id']
+            file_name = item['name']
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                print(f"Download {file_name}: {int(status.progress() * 100)}%")
+
+            fh.seek(0)
+            with open(os.path.join(output_folder, file_name), 'wb') as f:
+                f.write(fh.read())
+                print(f'Downloaded file: {file_name}')
+
+def merge_excel_files(input_folder, output_folder, output_filename):
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    excel_files = [f for f in os.listdir(input_folder) if f.endswith('.xlsx')]
+    merged_df = pd.DataFrame()
+
+    for file_name in excel_files:
+        file_path = os.path.join(input_folder, file_name)
+        print(f"Processing file: {file_name}")
+
+        try:
+            df = pd.read_excel(file_path, engine='openpyxl')
+            if merged_df.empty:
+                merged_df = df
+            else:
+                # Align columns based on their names
+                merged_df = pd.concat([merged_df, df], ignore_index=True, sort=False)
+            print(f"Successfully processed file: {file_name}")
+        except Exception as e:
+            print(f"Error reading file '{file_name}': {e}")
+
+    print(f"DataFrame before merge: {merged_df.head()}")
+    print(f"Merged DataFrame columns: {merged_df.columns}")
+
+    date_columns = [col for col in merged_df.columns if 'date' in col.lower()]
+    for col in date_columns:
+        try:
+            merged_df[col] = pd.to_datetime(merged_df[col]).dt.date
+        except pd.errors.OutOfBoundsDatetime:
+            print(f"Error converting column '{col}' to datetime. Invalid values may be present.")
+        except Exception as e:
+            print(f"Error processing date column '{col}': {e}")
+
+    output_path = os.path.join(output_folder, output_filename + '.xlsx')
+    
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        merged_df.to_excel(writer, index=False, sheet_name='Sheet1')
+
+        workbook  = writer.book
+        worksheet = writer.sheets['Sheet1']
+
+        header_fill = PatternFill(start_color='90EE90', end_color='90EE90', fill_type='solid')
+        for col_num, value in enumerate(merged_df.columns.values, 1):
+            cell = worksheet.cell(row=1, column=col_num)
+            cell.fill = header_fill
+
+    print(f'Merged file saved at: {output_path}')
+
+def merge_excel_files_from_drive(credentials_file_path, folder_id, output_folder, output_filename):
+    service = authenticate_google_drive(credentials_file_path)
+    download_files_from_drive(service, folder_id, output_folder)
+    merge_excel_files(output_folder, output_folder, output_filename)
+
+google_drive_folder_id = 'your_google_drive_folder_id'
+credentials_file_path = 'path_to_your_service_account_credentials.json'
+output_folder = 'path_to_your_output_folder'
+output_filename = 'merged_output_filename'
+
+merge_excel_files_from_drive(credentials_file_path, google_drive_folder_id, output_folder, output_filename)
